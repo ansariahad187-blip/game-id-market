@@ -1,7 +1,11 @@
 import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
@@ -344,11 +348,25 @@ class GameTab extends StatelessWidget {
               itemCount: items.length,
               itemBuilder: (_, i) {
                 final d = items[i];
+                final Uint8List thumb =
+                    (d['image'] as Uint8List?) ?? base64Decode(image);
                 return Card(
                   color: kDeep.withOpacity(0.75),
                   child: ListTile(
+                    onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => ListingDetailPage(data: d))),
+                    leading: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: SizedBox(
+                        width: 56,
+                        height: 56,
+                        child: Image.memory(thumb, fit: BoxFit.cover),
+                      ),
+                    ),
                     title: Text('${d['title']}'),
-                    subtitle: Text('Level ${d['level']}  |  ${d['desc']}'),
+                    subtitle: Text('Level ${d['level']}'),
                     trailing: Text('₹${d['price']}',
                         style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                   ),
@@ -373,27 +391,69 @@ class _SellPageState extends State<SellPage> {
   final title = TextEditingController();
   final level = TextEditingController();
   final price = TextEditingController();
-  final desc = TextEditingController();
+  final phone = TextEditingController();
+  Uint8List? photo;
+
+  @override
+  void initState() {
+    super.initState();
+    final p = FirebaseAuth.instance.currentUser?.phoneNumber ?? '';
+    if (p.startsWith('+91')) phone.text = p.substring(3);
+  }
+
+  void _msg(String t) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t)));
+  }
+
+  Future<void> pickPhoto() async {
+    try {
+      final f = await ImagePicker()
+          .pickImage(source: ImageSource.gallery, maxWidth: 1200, imageQuality: 80);
+      if (f == null) return;
+      final bytes = await f.readAsBytes();
+      if (mounted) setState(() => photo = bytes);
+    } catch (e) {
+      _msg('Photo nahi mili: $e');
+    }
+  }
 
   void save() {
     final p = int.tryParse(price.text.trim());
-    if (title.text.trim().isEmpty || p == null) return;
+    final ph = phone.text.trim();
+    if (title.text.trim().isEmpty || p == null) {
+      _msg('Title aur price daalo');
+      return;
+    }
+    if (ph.length != 10) {
+      _msg('10 digit ka contact number daalo');
+      return;
+    }
     listings.value = [
-      {'game': game, 'title': title.text.trim(), 'level': level.text.trim(), 'price': p, 'desc': desc.text.trim()},
+      {
+        'game': game,
+        'title': title.text.trim(),
+        'level': level.text.trim(),
+        'price': p,
+        'phone': ph,
+        'image': photo,
+      },
       ...listings.value,
     ];
     Navigator.pop(context);
   }
 
-  Widget field(String label, TextEditingController c, {bool number = false, int lines = 1}) {
+  Widget field(String label, TextEditingController c,
+      {bool number = false, int? maxLength}) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: TextField(
         controller: c,
-        maxLines: lines,
+        maxLength: maxLength,
         keyboardType: number ? TextInputType.number : TextInputType.text,
         decoration: InputDecoration(
           labelText: label,
+          counterText: '',
           border: const OutlineInputBorder(),
         ),
       ),
@@ -416,10 +476,33 @@ class _SellPageState extends State<SellPage> {
             onSelectionChanged: (s) => setState(() => game = s.first),
           ),
           const SizedBox(height: 16),
+          InkWell(
+            onTap: pickPhoto,
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              height: 180,
+              margin: const EdgeInsets.only(bottom: 12),
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.white38),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: photo == null
+                  ? const Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.add_a_photo, size: 40),
+                        SizedBox(height: 8),
+                        Text('ID ki photo upload karo'),
+                      ],
+                    )
+                  : Image.memory(photo!, fit: BoxFit.cover, width: double.infinity),
+            ),
+          ),
           field('Title (jaise: Elite Pass + 10 skins)', title),
           field('Level', level, number: true),
           field('Price (₹)', price, number: true),
-          field('Details (skins, rank, etc.)', desc, lines: 3),
+          field('Aapka contact number', phone, number: true, maxLength: 10),
           const Text('ID ka password yahan mat likho. Ye payment ke baad chat mein dena hai.',
               style: TextStyle(fontSize: 12)),
           const SizedBox(height: 16),
@@ -430,6 +513,133 @@ class _SellPageState extends State<SellPage> {
             child: const Text('Listing daalo'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class ListingDetailPage extends StatelessWidget {
+  final Map<String, dynamic> data;
+  const ListingDetailPage({super.key, required this.data});
+
+  Future<void> _open(BuildContext context, String url) async {
+    try {
+      final ok = await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+      if (!ok && context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Open nahi ho paya')));
+      }
+    } catch (_) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Open nahi ho paya')));
+      }
+    }
+  }
+
+  Widget _row(String k, String v) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 90, child: Text(k, style: const TextStyle(color: Colors.white60))),
+          Expanded(child: Text(v)),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isFf = data['game'] == 'ff';
+    final Uint8List img =
+        (data['image'] as Uint8List?) ?? base64Decode(isFf ? ffB64 : bgmiB64);
+    final phone = (data['phone'] ?? '').toString();
+    final info = (data['desc'] ?? '').toString();
+    final msg = Uri.encodeComponent('Hi, mujhe aapki ${data['title']} wali ID chahiye.');
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('ID details'), backgroundColor: kDeep),
+      body: ListView(
+        children: [
+          AspectRatio(
+            aspectRatio: 4 / 3,
+            child: Image.memory(img, fit: BoxFit.cover),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('${data['title']}',
+                    style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
+                Text('₹${data['price']}',
+                    style: const TextStyle(
+                        fontSize: 26,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFFB388FF))),
+                const SizedBox(height: 20),
+                const Text('Details',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
+                _row('Game', isFf ? 'Free Fire' : 'BGMI'),
+                _row('Level', '${data['level']}'),
+                if (info.isNotEmpty) _row('Info', info),
+                const SizedBox(height: 20),
+                const Text('Seller contact',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.phone),
+                  title: Text(phone.isEmpty ? 'Number nahi diya' : '+91 $phone'),
+                  trailing: phone.isEmpty
+                      ? null
+                      : IconButton(
+                          icon: const Icon(Icons.copy),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: phone));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('Number copy ho gaya')));
+                          },
+                        ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      bottomNavigationBar: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: phone.isEmpty ? null : () => _open(context, 'tel:+91$phone'),
+                  icon: const Icon(Icons.call),
+                  label: const Text('Call'),
+                  style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14)),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton.icon(
+                  onPressed: phone.isEmpty
+                      ? null
+                      : () => _open(context, 'https://wa.me/91$phone?text=$msg'),
+                  icon: const Icon(Icons.chat),
+                  label: const Text('Chat'),
+                  style: FilledButton.styleFrom(
+                      backgroundColor: kPurple,
+                      padding: const EdgeInsets.symmetric(vertical: 14)),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
